@@ -2,6 +2,15 @@
 
 This repository contains a minimal and reproducible implementation of **CoCP** for interval prediction.
 
+## What is CoCP?
+
+**CoCP (Co-optimization for Adaptive Conformal Prediction)** is a novel framework that learns prediction intervals by jointly optimizing a center \(m(x)\) and a radius \(h(x)\). 
+
+Unlike standard methods that often enforce a fixed notion of center, CoCP effectively corrects mis-centering under skewness and heteroscedasticity. By alternating between radius quantile regression and a boundary-local soft-coverage objective, CoCP drives the interval toward high-density regions, yielding tighter intervals and better conditional coverage.
+
+![CoCP Mechanism](assets/cocp_intro.gif)
+*Figure: The "push-pull" dynamic of CoCP. By balancing boundary densities in a folded geometry, CoCP approximately recovers the optimal Highest Density Interval (HDI).*
+
 ## Features
 
 - Only keeps the **CoCP** method
