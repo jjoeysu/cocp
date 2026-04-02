@@ -1,0 +1,62 @@
+# configs/real.yaml
+project:
+  out_dir: "results"
+  experiment_name: "real"
+  device: "cuda"
+  force_retrain: false
+  cache_models: true
+
+repro:
+  base_seed: 0
+  n_runs: 1
+  deterministic: true
+
+data:
+  dataset_names: ["bike", "bio", "blog", "facebook_1", "facebook_2", "homes", "superconductivity"]
+  base_path: "datasets"
+
+splits:
+  train: 0.5
+  val: 0.1
+  cal: 0.2
+  test: 0.2
+  shuffle: true
+
+conformal:
+  alpha: 0.1
+
+training:
+  batch_size: 512
+  max_epochs: 1000
+  patience: 100
+  grad_clip: 5.0
+
+  cocp:
+    num_hidden: 64
+    num_layers: 2
+    dropout: 0.0
+    weight_decay: 1.0e-5
+
+    lr_mu_max: 1.0e-3
+    lr_mu_min: 2.0e-4
+    lr_h_max: 1.0e-3
+    lr_h_min: 2.0e-4
+
+    beta_start: 0.005
+    beta_end: 0.005
+
+    batch_size: 512
+    max_epochs: 1000
+    patience: 100
+    n_folds: 4
+    n_alt_iters: 5
+    use_cp: true
+
+eval:
+  n_mc: 1000
+  save_predictions: false
+  save_models: true
+
+plots:
+  enabled: true
+  n_show: 2500
