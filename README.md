@@ -90,4 +90,20 @@ python scripts/plot_sensitivity.py --exp-dir results/sensitivity/real
 
 This repository keeps only the code needed for CoCP and its experiments.
 
+
+## Citation
+
+If you find this repository or our paper useful, please consider citing:
+
+```bibtex
+@misc{su2026cooptimizationadaptiveconformalprediction,
+      title={Co-optimization for Adaptive Conformal Prediction}, 
+      author={Xiaoyi Su and Zhixin Zhou and Rui Luo},
+      year={2026},
+      eprint={2603.01719},
+      archivePrefix={arXiv},
+      primaryClass={stat.ML},
+      url={https://arxiv.org/abs/2603.01719}, 
+}
+
 ---
