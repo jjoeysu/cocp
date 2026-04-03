@@ -3,6 +3,7 @@ __all__ = [
     "data",
     "models",
     "methods",
+    "methods_fast",
     "metrics",
     "plots",
     "experiment",

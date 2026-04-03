@@ -1,0 +1,5 @@
+.venv-cocp/
+results/
+__pycache__/
+cocp/__pycache__/
+*.pyc

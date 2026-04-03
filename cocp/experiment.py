@@ -14,6 +14,7 @@ import yaml
 from .config import Config, resolved_out_dir
 from .data import make_dataset, prepare_data_for_run
 from .methods import CoCP, FitContext
+from .methods_fast import CoCPFast
 from .metrics import evaluate_synthetic_intervals, summarize_cov_len, compute_real_metrics
 from .plots import save_summary_metrics_bar_chart, save_synth_1d_plot, save_real_centered_plot
 from .utils import ensure_dir, save_json, torch_save, torch_load, make_logger, set_seed
@@ -72,8 +73,13 @@ def run_experiment(cfg: Config):
                 alpha=float(cfg.conformal.alpha),
             )
 
-            method = CoCP()
-            state_path = model_dir / "cocp.pt"
+            variant = str(cfg.training.cocp.get("variant", "baseline")).lower()
+            if variant == "fast":
+                method = CoCPFast()
+            else:
+                persistent_blocks = bool(cfg.training.cocp.get("persistent_blocks", False))
+                method = CoCP(persistent_blocks=persistent_blocks)
+            state_path = model_dir / f"cocp_{variant}.pt"
 
             if cfg.project.cache_models and state_path.exists() and not cfg.project.force_retrain:
                 cached = torch_load(state_path, map_location="cpu")
@@ -124,7 +130,7 @@ def run_experiment(cfg: Config):
 
                 record = {
                     "Dataset": ds_name,
-                    "Method": "CoCP",
+                    "Method": method.name,
                     "Run": run_id,
                     "Coverage": float(stats["cov_mean"]),
                     "Length": float(stats["len_mean"]),
@@ -160,7 +166,7 @@ def run_experiment(cfg: Config):
 
                 record = {
                     "Dataset": ds_name,
-                    "Method": "CoCP",
+                    "Method": method.name,
                     "Run": run_id,
                     "Coverage": float(metrics["Coverage"]),
                     "Length": float(metrics["Length"]),

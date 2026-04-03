@@ -68,6 +68,76 @@ python scripts/run_experiment.py --config configs/real.yaml
 
 ---
 
+## Zhixin Update (April 2)
+
+Zhixin added a drop-in accelerated replacement called `CoCP-Fast` on April 2.
+
+It keeps the same CoCP objective and final conformal calibration, but changes the
+training schedule with:
+
+- phase-specific early stopping using `min_delta`
+- shorter budgets for `warmup mu`, `refine mu`, and `h`
+- optional fold-level parallelism
+
+### How to use the fast variant
+
+Add the following block under `training.cocp` in your config:
+
+```yaml
+training:
+  cocp:
+    variant: "fast"
+```
+
+That is enough to switch `run_experiment.py` from the baseline `CoCP` class to
+`CoCP-Fast`.
+
+### Optional fast settings
+
+`CoCP-Fast` will automatically provide defaults if you do not set them, but you
+can override them explicitly in the config:
+
+```yaml
+training:
+  cocp:
+    variant: "fast"
+    lr_mu_max: 1.5e-3
+    lr_h_max: 8e-4
+
+    warmup_mu_max_epochs: 300
+    warmup_mu_patience: 30
+    warmup_mu_min_delta: 1e-4
+
+    refine_mu_max_epochs: 120
+    refine_mu_patience: 15
+    refine_mu_min_delta: 5e-5
+
+    h_max_epochs: 80
+    h_patience: 12
+    h_min_delta: 5e-5
+
+    n_fold_workers: 2
+    fold_parallel_backend: "thread"
+    fold_num_threads: 1
+```
+
+### Code locations
+
+- Baseline method: `cocp/methods.py`
+- Fast replacement: `cocp/methods_fast.py`
+- Variant dispatch: `cocp/experiment.py`
+
+### Example command
+
+```bash
+python scripts/run_experiment.py --config configs/synth1d.yaml
+```
+
+If `training.cocp.variant: "fast"` is present in the config, the fast
+replacement will be used automatically.
+
+---
+
 ## Run sensitivity experiments
 
 ```bash
@@ -114,5 +184,6 @@ If you find this repository or our paper useful, please consider citing:
       primaryClass={stat.ML},
       url={https://arxiv.org/abs/2603.01719}, 
 }
+```
 
 ---
