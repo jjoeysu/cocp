@@ -532,7 +532,7 @@ class CoCP:
 
         can_parallelize = (
             n_fold_workers > 1
-            and device.type == "cpu"
+            # and device.type == "cpu"
             and n_folds > 1
         )
 
