@@ -80,8 +80,12 @@ def save_synth_1d_plot(X_test, y_test, lo, hi, out_path: Path, title: str, n_sho
     lo = np.asarray(lo).reshape(-1)
     hi = np.asarray(hi).reshape(-1)
 
-    order = np.argsort(x)
-    order = order[:min(n_show, len(order))]
+    n_total = len(x)
+    n_show = min(n_show, n_total)
+
+    idx = np.random.choice(n_total, n_show, replace=False)
+    sub_order = np.argsort(x[idx])
+    order = idx[sub_order]
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.scatter(x[order], y[order], s=8, alpha=0.2, color="gray", label="test samples")

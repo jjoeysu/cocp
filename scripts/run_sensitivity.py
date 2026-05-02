@@ -1,8 +1,11 @@
 # scripts/run_sensitivity.py
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from pathlib import Path
 import sys
 import argparse
+import torch.multiprocessing as mp
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -69,4 +72,8 @@ def main():
 
 
 if __name__ == "__main__":
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
     main()

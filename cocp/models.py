@@ -42,3 +42,23 @@ class ThresholdNet(nn.Module):
 
     def forward(self, x):
         return F.softplus(self.mlp(x).squeeze(-1))
+
+
+class QuantileNet(nn.Module):
+    """
+    Joint quantile model.
+    Outputs two quantiles:
+      - q_lo
+      - q_hi = q_lo + softplus(gap)
+    This ensures q_hi >= q_lo, avoiding quantile crossing.
+    """
+    def __init__(self, input_dim: int, num_hidden: int = 64, num_layers: int = 2, dropout: float = 0.0):
+        super().__init__()
+        self.mlp = MLP(input_dim, 2, num_hidden, num_layers, dropout)
+
+    def forward(self, x):
+        raw = self.mlp(x.float())           # [B, 2]
+        q_lo = raw[:, 0]
+        gap = F.softplus(raw[:, 1])         # gap > 0
+        q_hi = q_lo + gap
+        return torch.stack([q_lo, q_hi], dim=-1)   # [B, 2]

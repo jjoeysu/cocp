@@ -1,4 +1,4 @@
-# cocp/methods.py
+# cocp/methods_ada.py
 from __future__ import annotations
 
 import concurrent.futures
@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from sklearn.model_selection import KFold
 from torch.utils.data import DataLoader, TensorDataset
 
-from .models import MeanNet, ThresholdNet
+from .models import MeanNet, ThresholdNet, QuantileNet
 
 
 @dataclass
@@ -47,6 +47,8 @@ def _fit_single_fold(payload: Dict[str, Any]) -> Dict[str, Any]:
     y_val = payload["y_val"]
     mu_train_idx = payload["mu_train_idx"]
     h_train_idx = payload["h_train_idx"]
+    beta_train = payload["beta_train"]
+    beta_val = payload["beta_val"]
     params = payload["params"]
 
     fold_num_threads = int(params.get("fold_num_threads", 0))
@@ -95,17 +97,30 @@ def _fit_single_fold(payload: Dict[str, Any]) -> Dict[str, Any]:
     lr_mu_min = float(params["lr_mu_min"])
     lr_h_max = float(params["lr_h_max"])
     lr_h_min = float(params["lr_h_min"])
-    beta_start = float(params["beta_start"])
-    beta_end = float(params["beta_end"])
     n_alt_iters = int(params["n_alt_iters"])
     persistent_blocks = bool(params["persistent_blocks"])
     verbose = bool(params["verbose"])
 
     val_x = torch.from_numpy(X_val).float().to(device)
     val_y = torch.from_numpy(y_val).float().view(-1).to(device)
+    val_beta_t = torch.from_numpy(beta_val).float().view(-1).to(device)
 
-    loader_mu = CoCP._make_loader(X_train, y_train, mu_train_idx, batch_size=batch_size, shuffle=True)
-    loader_h = CoCP._make_loader(X_train, y_train, h_train_idx, batch_size=batch_size, shuffle=True)
+    loader_mu = CoCPAda._make_loader(
+        X_train,
+        y_train,
+        mu_train_idx,
+        batch_size=batch_size,
+        shuffle=True,
+        beta=beta_train[mu_train_idx],
+    )
+    loader_h = CoCPAda._make_loader(
+        X_train,
+        y_train,
+        h_train_idx,
+        batch_size=batch_size,
+        shuffle=True,
+        beta=beta_train[h_train_idx],
+    )
 
     mu_net = MeanNet(input_dim, num_hidden, num_layers, dropout).to(device)
     h_net = ThresholdNet(input_dim, num_hidden, num_layers, dropout).to(device)
@@ -135,14 +150,15 @@ def _fit_single_fold(payload: Dict[str, Any]) -> Dict[str, Any]:
             eta_min=lr_mu_min,
         )
 
-    CoCP._train_phase(
+    CoCPAda._train_phase(
         model=mu_net,
         optimizer=opt_mu,
         scheduler=sch_mu,
         loader=loader_mu,
         val_x=val_x,
         val_y=val_y,
-        loss_fn=lambda xb, yb, epoch: F.mse_loss(mu_net(xb).view(-1), yb),
+        val_beta=val_beta_t,
+        loss_fn=lambda xb, yb, bb, epoch: F.mse_loss(mu_net(xb).view(-1), yb),
         device=device,
         max_epochs=warmup_mu_max_epochs,
         patience=warmup_mu_patience,
@@ -154,7 +170,12 @@ def _fit_single_fold(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     for it in range(n_alt_iters):
-        loss_h_smooth = CoCP._make_smooth_h_loss(mu_net, h_net, tau, h_max_epochs, beta_start, beta_end)
+        loss_h_smooth = CoCPAda._make_smooth_h_loss(
+            mu_net=mu_net,
+            h_net=h_net,
+            tau=tau,
+        )
+
         if not persistent_blocks:
             opt_h = torch.optim.AdamW(h_net.parameters(), lr=lr_h_max, weight_decay=weight_decay)
             sch_h = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -163,13 +184,14 @@ def _fit_single_fold(payload: Dict[str, Any]) -> Dict[str, Any]:
                 eta_min=lr_h_min,
             )
 
-        CoCP._train_phase(
+        CoCPAda._train_phase(
             model=h_net,
             optimizer=opt_h,
             scheduler=sch_h,
             loader=loader_h,
             val_x=val_x,
             val_y=val_y,
+            val_beta=val_beta_t,
             loss_fn=loss_h_smooth,
             device=device,
             max_epochs=h_max_epochs,
@@ -181,7 +203,10 @@ def _fit_single_fold(payload: Dict[str, Any]) -> Dict[str, Any]:
             restore_aux_state=persistent_blocks,
         )
 
-        loss_mu = CoCP._make_mu_cov_loss(mu_net, h_net, refine_mu_max_epochs, beta_start, beta_end)
+        loss_mu = CoCPAda._make_mu_cov_loss(
+            mu_net=mu_net,
+            h_net=h_net,
+        )
         if persistent_blocks:
             opt_mu_refine = opt_mu
             sch_mu_refine = sch_mu
@@ -193,13 +218,14 @@ def _fit_single_fold(payload: Dict[str, Any]) -> Dict[str, Any]:
                 eta_min=lr_mu_min,
             )
 
-        CoCP._train_phase(
+        CoCPAda._train_phase(
             model=mu_net,
             optimizer=opt_mu_refine,
             scheduler=sch_mu_refine,
             loader=loader_mu,
             val_x=val_x,
             val_y=val_y,
+            val_beta=val_beta_t,
             loss_fn=loss_mu,
             device=device,
             max_epochs=refine_mu_max_epochs,
@@ -211,7 +237,7 @@ def _fit_single_fold(payload: Dict[str, Any]) -> Dict[str, Any]:
             restore_aux_state=persistent_blocks,
         )
 
-    loss_h_final = CoCP._make_h_loss(mu_net, h_net, tau)
+    loss_h_final = CoCPAda._make_h_loss(mu_net, h_net, tau)
     if persistent_blocks:
         opt_h_final = opt_h
         sch_h_final = sch_h
@@ -223,13 +249,14 @@ def _fit_single_fold(payload: Dict[str, Any]) -> Dict[str, Any]:
             eta_min=lr_h_min,
         )
 
-    CoCP._train_phase(
+    CoCPAda._train_phase(
         model=h_net,
         optimizer=opt_h_final,
         scheduler=sch_h_final,
         loader=loader_h,
         val_x=val_x,
         val_y=val_y,
+        val_beta=val_beta_t,
         loss_fn=loss_h_final,
         device=device,
         max_epochs=h_max_epochs,
@@ -243,29 +270,34 @@ def _fit_single_fold(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "fold_idx": fold_idx,
-        "mu_state": CoCP._cpu_state_dict(mu_net),
-        "h_state": CoCP._cpu_state_dict(h_net),
+        "mu_state": CoCPAda._cpu_state_dict(mu_net),
+        "h_state": CoCPAda._cpu_state_dict(h_net),
     }
 
 
-class CoCP:
+class CoCPAda:
     """
-    CoCP (Co-optimization for Adaptive Conformal Prediction)
+    CoCPAda (Co-optimization for Adaptive Conformal Prediction)
+
+    This class is the adaptive-beta variant only.
 
     Training logic:
-    1. Warmup Mu with MSE
-    2. Alternate:
-       - train H by SMOOTHED pinball loss on |y - mu(x)| (Strictly Convex, Lyapunov stable)
-       - refine Mu by smooth interval loss that directly optimizes coverage on the training folds
-    3. Final H adjustment using STANDARD pinball loss (Restore exact quantile property)
-    4. Optional conformal calibration on calibration set
+    1. Fit a joint quantile model on global training data
+    2. Convert predicted interval half-width h into sample-wise beta via
+           beta = ((1 - p) * h) / log((1 - epsilon) / epsilon)
+    3. Warmup Mu with MSE
+    4. Alternate:
+       - train H by smoothed pinball loss on |y - mu(x)| using sample-wise beta
+       - refine Mu by smooth coverage objective using sample-wise beta
+    5. Final H adjustment using standard pinball loss
+    6. Optional conformal calibration on calibration set
     """
 
-    name = "CoCP"
+    name = "CoCPAda"
 
     def __init__(self, persistent_blocks: bool = False):
         self.persistent_blocks = bool(persistent_blocks)
-        self.name = "CoCP-Persistent" if self.persistent_blocks else "CoCP"
+        self.name = "CoCPAda-Persistent" if self.persistent_blocks else "CoCPAda"
 
     @staticmethod
     def _device(ctx: FitContext) -> torch.device:
@@ -278,20 +310,243 @@ class CoCP:
         return {k: v.detach().cpu() for k, v in model.state_dict().items()}
 
     @staticmethod
-    def _make_loader(X, y, indices, batch_size, shuffle=True):
-        ds = TensorDataset(
-            torch.from_numpy(X[indices]).float(),
-            torch.from_numpy(y[indices]).float().view(-1),
-        )
+    def _make_loader(X, y, indices, batch_size, shuffle=True, beta=None):
+        x_t = torch.from_numpy(X[indices]).float()
+        y_t = torch.from_numpy(y[indices]).float().view(-1)
+
+        if beta is None:
+            raise ValueError("CoCPAda requires sample-wise beta for every loader.")
+
+        b_t = torch.from_numpy(np.asarray(beta, dtype=np.float32)).float().view(-1)
+        ds = TensorDataset(x_t, y_t, b_t)
         return DataLoader(ds, batch_size=int(batch_size), shuffle=shuffle)
 
     @staticmethod
-    def _get_exponential_beta(epoch: int, max_epochs: int, start: float, end: float) -> float:
-        if start <= 0 or end <= 0:
-            raise ValueError("beta_start and beta_end must be > 0.")
-        if max_epochs <= 1:
-            return float(end)
-        return float(start * ((end / start) ** (epoch / (max_epochs - 1))))
+    def _predict_net(model: torch.nn.Module, X: np.ndarray, device: torch.device, batch_size: int = 512):
+        model.eval()
+        outs = []
+        with torch.no_grad():
+            for s in range(0, len(X), batch_size):
+                xb = torch.from_numpy(X[s:s + batch_size]).float().to(device)
+                pred = model(xb)
+                outs.append(pred.detach().cpu().numpy())
+        return np.concatenate(outs, axis=0).astype(np.float32)
+
+    @staticmethod
+    def _train_quantile_net(
+        X_fit: np.ndarray,
+        y_fit: np.ndarray,
+        X_es: np.ndarray,
+        y_es: np.ndarray,
+        q_lo: float,
+        q_hi: float,
+        input_dim: int,
+        num_hidden: int,
+        num_layers: int,
+        dropout: float,
+        weight_decay: float,
+        batch_size: int,
+        lr: float,
+        lr_min: float,
+        max_epochs: int,
+        patience: int,
+        min_delta: float,
+        grad_clip: float,
+        device: torch.device,
+        seed: int,
+        phase_name: str = "",
+        verbose: bool = False,
+    ):
+        if not (0.0 < q_lo < q_hi < 1.0):
+            raise ValueError("Require 0 < q_lo < q_hi < 1.")
+
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        net = QuantileNet(input_dim, num_hidden, num_layers, dropout).to(device)
+        opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
+        sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt,
+            T_max=max_epochs,
+            eta_min=lr_min,
+        )
+
+        idx = np.arange(len(X_fit))
+        loader = CoCPAda._make_loader(
+            X_fit,
+            y_fit,
+            idx,
+            batch_size=batch_size,
+            shuffle=True,
+            beta=np.ones(len(idx), dtype=np.float32),  # placeholder, not used in loss
+        )
+
+        val_x = torch.from_numpy(X_es).float().to(device)
+        val_y = torch.from_numpy(y_es).float().view(-1).to(device)
+        val_beta = torch.ones(len(X_es), dtype=torch.float32, device=device)
+
+        def joint_quantile_loss(xb, yb, bb, epoch):
+            pred = net(xb)
+            qlo_pred = pred[:, 0]
+            qhi_pred = pred[:, 1]
+
+            loss_lo = pinball(yb, qlo_pred, q_lo)
+            loss_hi = pinball(yb, qhi_pred, q_hi)
+
+            return torch.stack([loss_lo, loss_hi], dim=-1).mean()
+
+        CoCPAda._train_phase(
+            model=net,
+            optimizer=opt,
+            scheduler=sch,
+            loader=loader,
+            val_x=val_x,
+            val_y=val_y,
+            val_beta=val_beta,
+            loss_fn=joint_quantile_loss,
+            device=device,
+            max_epochs=max_epochs,
+            patience=patience,
+            min_delta=min_delta,
+            grad_clip=grad_clip,
+            phase_name=phase_name,
+            verbose=verbose,
+            restore_aux_state=False,
+        )
+        return net
+
+    @staticmethod
+    def _beta_from_half_width(
+        half_width: np.ndarray,
+        p: float,
+        epsilon: float,
+    ) -> np.ndarray:
+        """
+        Compute sample-wise beta from predicted interval half-width h using:
+            beta = ((1 - p) * h) / log((1 - epsilon) / epsilon)
+        """
+        if not (0.0 < p < 1.0):
+            raise ValueError("Require 0 < adaptive_beta_p < 1.")
+        if not (0.0 < epsilon < 0.5):
+            raise ValueError("Require 0 < adaptive_beta_epsilon < 0.5.")
+
+        half_width = np.asarray(half_width, dtype=np.float32).reshape(-1)
+        half_width = np.maximum(half_width, 1e-6)
+
+        denom = math.log((1.0 - epsilon) / epsilon)
+        if not np.isfinite(denom) or denom <= 0:
+            raise ValueError("Invalid denominator in adaptive beta formula. Check adaptive_beta_epsilon.")
+
+        beta = ((1.0 - p) * half_width) / denom
+        beta = np.maximum(beta, 1e-6)
+        return beta.astype(np.float32)
+
+    @staticmethod
+    def _prepare_global_adaptive_betas(
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        ctx: FitContext,
+        *,
+        input_dim: int,
+        num_hidden: int,
+        num_layers: int,
+        dropout: float,
+        weight_decay: float,
+        batch_size: int,
+        grad_clip: float,
+        lr: float,
+        lr_min: float,
+        max_epochs: int,
+        patience: int,
+        min_delta: float,
+        q_lo: float,
+        q_hi: float,
+        beta_p: float,
+        beta_epsilon: float,
+        verbose: bool = True,
+    ):
+        if not (0.0 < q_lo < q_hi < 1.0):
+            raise ValueError("Require 0 < adaptive_beta_q_lo < adaptive_beta_q_hi < 1.")
+        if not (0.0 < beta_p < 1.0):
+            raise ValueError("Require 0 < adaptive_beta_p < 1.")
+        if not (0.0 < beta_epsilon < 0.5):
+            raise ValueError("Require 0 < adaptive_beta_epsilon < 0.5.")
+
+        device = CoCPAda._device(ctx)
+
+        if verbose:
+            print(
+                f">>> Adaptive beta: fit joint quantile model on global X_train, "
+                f"early-stop on external X_val "
+                f"(q_lo={q_lo}, q_hi={q_hi}, p={beta_p}, epsilon={beta_epsilon})"
+            )
+
+        q_net = CoCPAda._train_quantile_net(
+            X_fit=X_train,
+            y_fit=y_train,
+            X_es=X_val,
+            y_es=y_val,
+            q_lo=q_lo,
+            q_hi=q_hi,
+            input_dim=input_dim,
+            num_hidden=num_hidden,
+            num_layers=num_layers,
+            dropout=dropout,
+            weight_decay=weight_decay,
+            batch_size=batch_size,
+            lr=lr,
+            lr_min=lr_min,
+            max_epochs=max_epochs,
+            patience=patience,
+            min_delta=min_delta,
+            grad_clip=grad_clip,
+            device=device,
+            seed=int(ctx.seed) + 101,
+            phase_name="AdaptiveBeta-Quantiles",
+            verbose=verbose,
+        )
+
+        pred_train = CoCPAda._predict_net(q_net, X_train, device=device, batch_size=batch_size)
+        qlo_train = pred_train[:, 0]
+        qhi_train = pred_train[:, 1]
+        width_train = np.maximum(qhi_train - qlo_train, 1e-6).astype(np.float32)
+        half_width_train = np.maximum(0.5 * width_train, 1e-6).astype(np.float32)
+
+        pred_val = CoCPAda._predict_net(q_net, X_val, device=device, batch_size=batch_size)
+        qlo_val = pred_val[:, 0]
+        qhi_val = pred_val[:, 1]
+        width_val = np.maximum(qhi_val - qlo_val, 1e-6).astype(np.float32)
+        half_width_val = np.maximum(0.5 * width_val, 1e-6).astype(np.float32)
+
+        beta_train = CoCPAda._beta_from_half_width(
+            half_width_train,
+            p=beta_p,
+            epsilon=beta_epsilon,
+        )
+        beta_val = CoCPAda._beta_from_half_width(
+            half_width_val,
+            p=beta_p,
+            epsilon=beta_epsilon,
+        )
+
+        if verbose:
+            print(
+                ">>> Adaptive beta stats | "
+                f"half-width train: mean={half_width_train.mean():.6f}, "
+                f"min={half_width_train.min():.6f}, max={half_width_train.max():.6f} | "
+                f"half-width val: mean={half_width_val.mean():.6f}, "
+                f"min={half_width_val.min():.6f}, max={half_width_val.max():.6f} | "
+                f"beta train: mean={beta_train.mean():.6f}, "
+                f"min={beta_train.min():.6f}, max={beta_train.max():.6f} | "
+                f"beta val: mean={beta_val.mean():.6f}, "
+                f"min={beta_val.min():.6f}, max={beta_val.max():.6f}"
+            )
+
+        return beta_train, beta_val
 
     @staticmethod
     def _train_phase(
@@ -301,6 +556,7 @@ class CoCP:
         loader,
         val_x: torch.Tensor,
         val_y: torch.Tensor,
+        val_beta: torch.Tensor,
         loss_fn,
         device: torch.device,
         max_epochs: int,
@@ -319,12 +575,14 @@ class CoCP:
 
         for epoch in range(int(max_epochs)):
             model.train()
-            for xb, yb in loader:
+            for batch in loader:
+                xb, yb, bb = batch
                 xb = xb.to(device)
                 yb = yb.to(device).view(-1)
+                bb = bb.to(device).view(-1)
 
                 optimizer.zero_grad(set_to_none=True)
-                loss = loss_fn(xb, yb, epoch)
+                loss = loss_fn(xb, yb, bb, epoch)
                 loss.backward()
                 if grad_clip is not None and grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -335,7 +593,7 @@ class CoCP:
 
             model.eval()
             with torch.no_grad():
-                val_loss = float(loss_fn(val_x, val_y, epoch).item())
+                val_loss = float(loss_fn(val_x, val_y, val_beta, epoch).item())
 
             if val_loss < (best_val - float(min_delta)):
                 best_val = val_loss
@@ -366,7 +624,7 @@ class CoCP:
     def _make_h_loss(mu_net: MeanNet, h_net: ThresholdNet, tau: float):
         mu_net.eval()
 
-        def loss_h(xb, yb, epoch):
+        def loss_h(xb, yb, beta_b, epoch):
             with torch.no_grad():
                 mu_y = mu_net(xb).view(-1)
             diff = torch.abs(yb - mu_y)
@@ -374,42 +632,50 @@ class CoCP:
             return pinball(diff, h_val, tau).mean()
 
         return loss_h
-    
+
     @staticmethod
-    def _make_smooth_h_loss(mu_net: MeanNet, h_net: ThresholdNet, tau: float, max_epochs: int, beta_start: float, beta_end: float):
-        """
-        Smoothed Pinball Loss using Softplus.
-        This guarantees strict convexity and Lyapunov stability during alternating iterations.
-        """
+    def _make_smooth_h_loss(
+        mu_net: MeanNet,
+        h_net: ThresholdNet,
+        tau: float,
+    ):
         mu_net.eval()
 
-        def loss_h(xb, yb, epoch):
-            curr_beta = CoCP._get_exponential_beta(epoch, max_epochs, beta_start, beta_end)
+        def loss_h(xb, yb, beta_b, epoch):
+            curr_beta = torch.clamp(beta_b.view(-1), min=1e-6)
+
             with torch.no_grad():
                 mu_y = mu_net(xb).view(-1)
-            
+
             delta = yb - mu_y
             h_val = h_net(xb).view(-1)
-            
-            # L = beta * softplus((h - delta)/beta) + beta * softplus((-h - delta)/beta) - tau * h
+
             term1 = curr_beta * F.softplus((h_val - delta) / curr_beta)
             term2 = curr_beta * F.softplus((-h_val - delta) / curr_beta)
-            
+
             loss = term1 + term2 - tau * h_val
             return loss.mean()
 
         return loss_h
 
     @staticmethod
-    def _make_mu_cov_loss(mu_net: MeanNet, h_net: ThresholdNet, max_epochs: int, beta_start: float, beta_end: float):
+    def _make_mu_cov_loss(
+        mu_net: MeanNet,
+        h_net: ThresholdNet,
+    ):
         h_net.eval()
 
-        def loss_mu(xb, yb, epoch):
-            curr_beta = CoCP._get_exponential_beta(epoch, max_epochs, beta_start, beta_end)
+        def loss_mu(xb, yb, beta_b, epoch):
+            curr_beta = torch.clamp(beta_b.view(-1), min=1e-6)
+
             mu_y = mu_net(xb).view(-1)
             with torch.no_grad():
                 h_y = h_net(xb).view(-1)
-            return -(torch.sigmoid((h_y - (yb - mu_y)) / curr_beta) - torch.sigmoid((- h_y - (yb - mu_y)) / curr_beta)).mean()
+
+            return -(
+                torch.sigmoid((h_y - (yb - mu_y)) / curr_beta)
+                - torch.sigmoid((-h_y - (yb - mu_y)) / curr_beta)
+            ).mean()
 
         return loss_mu
 
@@ -453,7 +719,6 @@ class CoCP:
 
     def fit(self, X_train, y_train, X_val, y_val, X_cal, y_cal, ctx: FitContext, cfg):
         acfg = cfg.training.cocp
-        device = self._device(ctx)
         tau = 1.0 - float(ctx.alpha)
 
         input_dim = int(X_train.shape[1])
@@ -485,8 +750,15 @@ class CoCP:
         lr_h_max = float(acfg.get("lr_h_max", 1e-3))
         lr_h_min = float(acfg.get("lr_h_min", 1e-5))
 
-        beta_start = float(acfg.get("beta_start", 0.01))
-        beta_end = float(acfg.get("beta_end", 0.01))
+        adaptive_beta_q_lo = float(acfg.get("adaptive_beta_q_lo", float(ctx.alpha) / 2.0))
+        adaptive_beta_q_hi = float(acfg.get("adaptive_beta_q_hi", 1.0 - float(ctx.alpha) / 2.0))
+        adaptive_beta_p = float(acfg.get("adaptive_beta_p", 0.8))
+        adaptive_beta_epsilon = float(acfg.get("adaptive_beta_epsilon", 0.01))
+        adaptive_beta_max_epochs = int(acfg.get("adaptive_beta_max_epochs", max_epochs))
+        adaptive_beta_patience = int(acfg.get("adaptive_beta_patience", patience))
+        adaptive_beta_min_delta = float(acfg.get("adaptive_beta_min_delta", min_delta))
+        adaptive_beta_lr = float(acfg.get("adaptive_beta_lr", lr_h_max))
+        adaptive_beta_lr_min = float(acfg.get("adaptive_beta_lr_min", lr_h_min))
 
         n_folds = int(acfg.get("n_folds", 4))
         n_alt_iters = int(acfg.get("n_alt_iters", 5))
@@ -499,11 +771,33 @@ class CoCP:
         if n_folds < 2:
             raise ValueError("n_folds must be >= 2")
 
-        val_x = torch.from_numpy(X_val).float().to(device)
-        val_y = torch.from_numpy(y_val).float().view(-1).to(device)
-
         kf = KFold(n_splits=n_folds, shuffle=True, random_state=ctx.seed)
         folds = list(kf.split(X_train))
+
+        beta_train_all, beta_val_all = self._prepare_global_adaptive_betas(
+            X_train=X_train,
+            y_train=y_train,
+            X_val=X_val,
+            y_val=y_val,
+            ctx=ctx,
+            input_dim=input_dim,
+            num_hidden=num_hidden,
+            num_layers=num_layers,
+            dropout=dropout,
+            weight_decay=weight_decay,
+            batch_size=batch_size,
+            grad_clip=grad_clip,
+            lr=adaptive_beta_lr,
+            lr_min=adaptive_beta_lr_min,
+            max_epochs=adaptive_beta_max_epochs,
+            patience=adaptive_beta_patience,
+            min_delta=adaptive_beta_min_delta,
+            q_lo=adaptive_beta_q_lo,
+            q_hi=adaptive_beta_q_hi,
+            beta_p=adaptive_beta_p,
+            beta_epsilon=adaptive_beta_epsilon,
+            verbose=verbose,
+        )
 
         ensemble_states = []
         fold_params = {
@@ -530,8 +824,6 @@ class CoCP:
             "lr_mu_min": lr_mu_min,
             "lr_h_max": lr_h_max,
             "lr_h_min": lr_h_min,
-            "beta_start": beta_start,
-            "beta_end": beta_end,
             "n_alt_iters": n_alt_iters,
             "persistent_blocks": self.persistent_blocks,
             "verbose": verbose,
@@ -540,8 +832,9 @@ class CoCP:
 
         print(
             f"\n>>> Start {self.name} | K={n_folds}, T={n_alt_iters}, "
-            f"beta=({beta_start}, {beta_end})"
+            f"p={adaptive_beta_p}, epsilon={adaptive_beta_epsilon}"
         )
+
         fold_payloads = []
         for fold_idx, (mu_train_idx, h_train_idx) in enumerate(folds):
             fold_payloads.append({
@@ -552,12 +845,13 @@ class CoCP:
                 "y_val": y_val,
                 "mu_train_idx": mu_train_idx,
                 "h_train_idx": h_train_idx,
+                "beta_train": beta_train_all,
+                "beta_val": beta_val_all,
                 "params": fold_params,
             })
 
         can_parallelize = (
             n_fold_workers > 1
-            # and device.type == "cpu"
             and n_folds > 1
         )
 

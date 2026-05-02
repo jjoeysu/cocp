@@ -43,8 +43,8 @@ training:
     weight_decay: 1.0e-5
 
     lr_mu_max: 1.0e-3
-    lr_mu_min: 0.0
-    lr_h_max: 1.0e-3
+    lr_mu_min: 1.0e-3
+    lr_h_max: 5.0e-4
     lr_h_min: 0.0
 
     beta_start: 0.005
@@ -72,6 +72,18 @@ training:
     n_fold_workers: 4
     fold_parallel_backend: "process"
     fold_num_threads: 1
+
+    adaptive_beta: false
+    adaptive_beta_q_lo: 0.05
+    adaptive_beta_q_hi: 0.95
+    adaptive_beta_p: 0.8
+    adaptive_beta_epsilon: 0.01
+
+    adaptive_beta_max_epochs: 400
+    adaptive_beta_patience: 50
+    adaptive_beta_min_delta: 0.0
+    adaptive_beta_lr: 1.0e-3
+    adaptive_beta_lr_min: 5.0e-4
 
 eval:
   n_mc: 1000

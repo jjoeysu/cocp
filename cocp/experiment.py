@@ -14,7 +14,8 @@ import yaml
 from .config import Config, resolved_out_dir
 from .data import make_dataset, prepare_data_for_run
 from .methods import CoCP, FitContext
-from .methods_fast import CoCPFast
+from .methods_ada import CoCPAda
+from .methods_fast import CoCPFast, CoCPAdaFast
 from .metrics import evaluate_synthetic_intervals, summarize_cov_len, compute_real_metrics
 from .plots import save_summary_metrics_bar_chart, save_synth_1d_plot, save_real_centered_plot
 from .utils import ensure_dir, save_json, torch_save, torch_load, make_logger, set_seed
@@ -74,12 +75,14 @@ def run_experiment(cfg: Config):
             )
 
             variant = str(cfg.training.cocp.get("variant", "baseline")).lower()
-            if variant == "fast":
-                method = CoCPFast()
+            adaptive_beta = bool(cfg.training.cocp.get("adaptive_beta", False))
+            persistent_blocks = bool(cfg.training.cocp.get("persistent_blocks", False))
+            if adaptive_beta:
+                method = CoCPAdaFast() if variant == "fast" else CoCPAda(persistent_blocks=persistent_blocks)
             else:
-                persistent_blocks = bool(cfg.training.cocp.get("persistent_blocks", False))
-                method = CoCP(persistent_blocks=persistent_blocks)
-            state_path = model_dir / f"cocp_{variant}.pt"
+                method = CoCPFast() if variant == "fast" else CoCP(persistent_blocks=persistent_blocks)
+            
+            state_path = model_dir / f"cocp_ada_{variant}.pt" if adaptive_beta else model_dir / f"cocp_{variant}.pt"
 
             if cfg.project.cache_models and state_path.exists() and not cfg.project.force_retrain:
                 cached = torch_load(state_path, map_location="cpu")
@@ -186,7 +189,7 @@ def run_experiment(cfg: Config):
                         lo=lo,
                         hi=hi,
                         out_path=fig_dir / "centered_interval_plot.png",
-                        title=f"{ds_name} - CoCP",
+                        title=f"{ds_name} - {method.name}",
                         n_show=cfg.plots.n_show,
                     )
 

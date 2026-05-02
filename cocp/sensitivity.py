@@ -8,6 +8,7 @@ import gc
 import hashlib
 import json
 import time
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -17,9 +18,19 @@ import yaml
 from .config import Config
 from .data import make_dataset, prepare_data_for_run
 from .methods import CoCP, FitContext
+from .methods_fast import CoCPFast
 from .metrics import evaluate_synthetic_intervals, summarize_cov_len, compute_real_metrics
 from .plots import save_sensitivity_lineplots
 from .utils import ensure_dir, make_logger, set_seed, torch_save, torch_load, save_json
+
+
+def _build_method(cfg: Config):
+    variant = str(cfg.training.cocp.get("variant", "baseline")).lower()
+    if variant == "baseline":
+        return CoCP()
+    if variant == "fast":
+        return CoCPFast()
+    raise ValueError(f"Unknown CoCP variant: {variant}")
 
 
 def _flatten_multiindex_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -38,7 +49,7 @@ def _make_summary(df: pd.DataFrame) -> pd.DataFrame:
     if len(df) == 0:
         return df.copy()
 
-    group_cols = ["Experiment", "Dataset", "Study", "Param_Name", "Param_Value", "Beta", "K", "T"]
+    group_cols = ["Experiment", "Dataset", "Study", "Param_Name", "Param_Value", "Beta", "K", "T", "Variant"]
     numeric_cols = [
         c for c in df.select_dtypes(include=[np.number]).columns
         if c not in group_cols and c != "Run"
@@ -64,7 +75,7 @@ def _build_variant_cfg(base_cfg: Config, beta=None, k=None, t=None) -> Config:
     return cfg_i
 
 
-def _cache_key(dataset: str, run_id: int, seed: int, beta: float, k: int, t: int) -> str:
+def _cache_key(dataset: str, run_id: int, seed: int, beta: float, k: int, t: int, variant: str) -> str:
     payload = {
         "dataset": str(dataset),
         "run_id": int(run_id),
@@ -72,6 +83,7 @@ def _cache_key(dataset: str, run_id: int, seed: int, beta: float, k: int, t: int
         "beta": float(beta),
         "k": int(k),
         "t": int(t),
+        "variant": str(variant),
     }
     text = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.md5(text.encode("utf-8")).hexdigest()
@@ -83,7 +95,7 @@ def _cache_paths(run_dir: Path, key: str):
 
 
 def _fit_with_cache(
-    method: CoCP,
+    method: Any,
     run_dir: Path,
     dataset_name: str,
     run_id: int,
@@ -96,15 +108,16 @@ def _fit_with_cache(
     ctx: FitContext,
     logger,
 ):
-    key = _cache_key(dataset_name, run_id, seed, beta, k, t)
+    variant = str(cfg_variant.training.cocp.get("variant", "baseline")).lower()
+    key = _cache_key(dataset_name, run_id, seed, beta, k, t, variant)
     path = _cache_paths(run_dir, key)
 
     if path.exists() and cfg_variant.project.cache_models and not cfg_variant.project.force_retrain:
         cached = torch_load(path, map_location="cpu")
-        logger.info(f"[CACHE HIT] dataset={dataset_name} run={run_id} beta={beta} K={k} T={t}")
+        logger.info(f"[CACHE HIT] dataset={dataset_name} run={run_id} variant={variant} beta={beta} K={k} T={t}")
         return cached["state"], float(cached["train_time"]), True
 
-    logger.info(f"[CACHE MISS] dataset={dataset_name} run={run_id} beta={beta} K={k} T={t}")
+    logger.info(f"[CACHE MISS] dataset={dataset_name} run={run_id} variant={variant} beta={beta} K={k} T={t}")
 
     t0 = time.perf_counter()
     state = method.fit(
@@ -120,7 +133,7 @@ def _fit_with_cache(
     return state, train_time, False
 
 
-def _evaluate_setting(cfg_variant: Config, dataset, is_synthetic: bool, data: dict, method: CoCP, state, train_time: float, ctx: FitContext, loaded_from_cache: bool):
+def _evaluate_setting(cfg_variant: Config, dataset, is_synthetic: bool, data: dict, method: Any, state, train_time: float, ctx: FitContext, loaded_from_cache: bool):
     t0 = time.perf_counter()
     lo, hi = method.predict(data["X_test"], state=state, ctx=ctx)
     infer_time = time.perf_counter() - t0
@@ -136,7 +149,7 @@ def _evaluate_setting(cfg_variant: Config, dataset, is_synthetic: bool, data: di
             seed=ctx.seed + 2024,
         )
         stats = summarize_cov_len(cov_vec, len_vec, target=1.0 - float(cfg_variant.conformal.alpha))
-        record = {
+        record: dict[str, Any] = {
             "Coverage": float(stats["cov_mean"]),
             "Length": float(stats["len_mean"]),
             "ConMAE": float(stats["cov_mae_to_target"]),
@@ -150,7 +163,7 @@ def _evaluate_setting(cfg_variant: Config, dataset, is_synthetic: bool, data: di
             hi=hi,
             alpha=float(cfg_variant.conformal.alpha),
         )
-        record = {
+        record: dict[str, Any] = {
             "Coverage": float(metrics["Coverage"]),
             "Length": float(metrics["Length"]),
             "MSCE": float(metrics["MSCE"]),
@@ -158,9 +171,11 @@ def _evaluate_setting(cfg_variant: Config, dataset, is_synthetic: bool, data: di
             "l1ERT": float(metrics["l1ERT"]),
             "l2ERT": float(metrics["l2ERT"]),
         }
-
+    
+    variant = str(cfg_variant.training.cocp.get("variant", "baseline")).lower()
     record.update({
         "Method": "CoCP",
+        "Variant": variant,
         "Train_Time": float(train_time),
         "Infer_Time": float(infer_time),
         "Total_Time": float(total_time),
@@ -204,6 +219,7 @@ def run_cocp_sensitivity(
         {
             "config_path": config_path,
             "experiment_name": exp_name,
+            "variant": str(cfg.training.cocp.get("variant", "baseline")).lower(),
             "baseline": {
                 "beta": baseline_beta,
                 "K": baseline_k,
@@ -237,7 +253,7 @@ def run_cocp_sensitivity(
             for beta in beta_values:
                 cfg_i = _build_variant_cfg(cfg, beta=beta, k=baseline_k, t=baseline_t)
                 ctx = FitContext(device=cfg_i.project.device, run_dir=str(run_dir), seed=seed, alpha=float(cfg_i.conformal.alpha))
-                method = CoCP()
+                method = _build_method(cfg_i)
 
                 state, train_time, loaded = _fit_with_cache(
                     method=method,
@@ -255,6 +271,7 @@ def run_cocp_sensitivity(
                 )
 
                 record = _evaluate_setting(cfg_i, dataset, is_synthetic, data, method, state, train_time, ctx, loaded)
+                record = dict(record)  # type: dict[str, Any]
                 record.update({
                     "Experiment": exp_name,
                     "Dataset": ds_name,
@@ -273,7 +290,7 @@ def run_cocp_sensitivity(
             for k in k_values:
                 cfg_i = _build_variant_cfg(cfg, beta=baseline_beta, k=k, t=baseline_t)
                 ctx = FitContext(device=cfg_i.project.device, run_dir=str(run_dir), seed=seed, alpha=float(cfg_i.conformal.alpha))
-                method = CoCP()
+                method = _build_method(cfg_i)
 
                 state, train_time, loaded = _fit_with_cache(
                     method=method,
@@ -291,6 +308,7 @@ def run_cocp_sensitivity(
                 )
 
                 record = _evaluate_setting(cfg_i, dataset, is_synthetic, data, method, state, train_time, ctx, loaded)
+                record = dict(record)  # type: dict[str, Any]
                 record.update({
                     "Experiment": exp_name,
                     "Dataset": ds_name,
@@ -309,7 +327,7 @@ def run_cocp_sensitivity(
             for t in t_values:
                 cfg_i = _build_variant_cfg(cfg, beta=baseline_beta, k=baseline_k, t=t)
                 ctx = FitContext(device=cfg_i.project.device, run_dir=str(run_dir), seed=seed, alpha=float(cfg_i.conformal.alpha))
-                method = CoCP()
+                method = _build_method(cfg_i)
 
                 state, train_time, loaded = _fit_with_cache(
                     method=method,
@@ -327,6 +345,7 @@ def run_cocp_sensitivity(
                 )
 
                 record = _evaluate_setting(cfg_i, dataset, is_synthetic, data, method, state, train_time, ctx, loaded)
+                record = dict(record)  # type: dict[str, Any]
                 record.update({
                     "Experiment": exp_name,
                     "Dataset": ds_name,
