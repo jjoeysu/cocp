@@ -1,29 +1,22 @@
-# CoCP: Co-optimization for Adaptive Conformal Prediction
+# Co-optimization for Adaptive Conformal Prediction
+**NeurIPS 2026** | [Paper](https://arxiv.org/abs/2603.01719)
 
-This repository contains a minimal and reproducible implementation of **CoCP** for interval prediction.
+This repository provides a minimal and reproducible implementation of **CoCP (Co-optimization for Adaptive Conformal Prediction)** for adaptive prediction intervals in univariate regression.
 
-## What is CoCP?
+CoCP is a conformal regression framework that learns prediction intervals by jointly optimizing their **center** $m(x)$ and **radius** $h(x)$. Unlike conventional equal-tailed approaches, CoCP explicitly adapts both interval location and width to the conditional distribution, improving interval efficiency and empirical conditional-coverage reliability, particularly under skewness.
 
-**CoCP (Co-optimization for Adaptive Conformal Prediction)** is a novel framework that learns prediction intervals by jointly optimizing a center $m(x)$ and a radius $h(x)$. 
-
-Unlike standard methods with fixed centers, CoCP corrects mis-centering under skewness and heteroscedasticity through a principled alternating optimization framework:
-
-1. **Initialization**: Pre-trains an initial center $m(x)$.
-2. **Alternating Optimization**: Iteratively co-optimizes the interval geometry:
-   - **Radius Update**: Learns $h(x)$ via smooth quantile regression on folded residuals.
-   - **Center Refinement**: Shifts $m(x)$ toward high-density regions using a smooth interval loss.
-3. **Fine-tuning & Calibration**: Removes the smoothing bias from $h(x)$ via standard pinball loss, followed by conformal calibration to guarantee marginal coverage.
+The key idea is a **boundary-balancing principle** in the folded distribution of $|Y-m(x)|$. By alternately refining the center and radius, CoCP shifts prediction intervals toward high-density regions through a *push–pull* mechanism, approaching the optimal Highest Density Interval (HDI) under unimodality. Combined with split-conformal calibration, CoCP guarantees finite-sample marginal coverage and, under suitable regularity and consistency conditions, achieves asymptotic conditional coverage and optimal interval length.
 
 
 
 ![CoCP Mechanism](assets/cocp_intro.gif)
-*Figure: The "push-pull" dynamic of CoCP. By balancing boundary densities in a folded geometry, CoCP approximately recovers the optimal Highest Density Interval (HDI).*
+*Figure: The push–pull mechanism of CoCP. Center refinement balances the densities at the interval boundaries, reducing the required radius and guiding the interval toward the optimal HDI.*
 
 ## Features
 
-- **Sample-Adaptive Smoothing (New)**: Introduces a dynamic, instance-dependent temperature parameter $\beta(x)$. By utilizing a lightweight Quantile Regression (QR) warm-up, CoCP scales $\beta$ proportionally to the local interval radius, preserving a consistent geometric shape across the covariate space and eliminating the need for manual tuning.
-- **Fast Variant by Default**: Optimized training schedule featuring phase-specific early stopping, shortened budgets, and fold-level multiprocessing.
-- **Minimal & Focused**: Contains only the essential CoCP methods, supporting 1D synthetic and real-world benchmarks, alongside comprehensive sensitivity analysis tools.
+- **Sample-Adaptive Smoothing**: Supports an instance-dependent smoothing parameter $\beta(x)$, estimated through a lightweight quantile regression warm-up, to preserve local interval geometry and reduce the need for manual tuning.
+- **Fast Training Variant**: Accelerates offline training through fold-level parallelization and improved early stopping.
+- **Minimal & Reproducible**: Provides essential CoCP implementations, synthetic and real-world benchmarks, and sensitivity analysis tools.
 
 
 ---
@@ -83,7 +76,7 @@ These parameters were designed for optional exponential annealing of $\beta$ dur
 **To adjust $\beta$, please set both `beta_start` and `beta_end` to the exact same value.**
 
 ### 2. Sample-Adaptive Smoothing (Adaptive $\beta$)
-To enable the new sample-adaptive smoothing strategy, use the adaptive variant and configure the `adaptive_beta` parameters:
+To enable sample-adaptive smoothing, set `adaptive_beta: true` and configure the following parameters:
 
 ```yaml
 training:
@@ -130,7 +123,7 @@ python scripts/plot_sensitivity.py --exp-dir results/sensitivity/real
 If you find this repository or our paper useful, please consider citing:
 
 ```bibtex
-@misc{su2026cooptimizationadaptiveconformalprediction,
+@misc{su2026cooptimization,
       title={Co-optimization for Adaptive Conformal Prediction}, 
       author={Xiaoyi Su and Zhixin Zhou and Rui Luo},
       year={2026},
